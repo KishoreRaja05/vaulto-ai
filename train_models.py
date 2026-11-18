@@ -1,93 +1,209 @@
-﻿import os
-import pandas as pd
-import numpy as np
+﻿"""Reproducible training for the Vaulto AI ML artifacts.
+
+Run:  python train_models.py
+Reads only data/*.csv next to this file and writes app/saved_models/*.joblib.
+"""
+
+import difflib
+import re
+from pathlib import Path
+
 import joblib
+import numpy as np
+import pandas as pd
 from sklearn.ensemble import IsolationForest, RandomForestClassifier
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, classification_report
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import FeatureUnion
 
-DATA_DIR = r"C:\Users\KISHORE\Downloads\archive"
-MODEL_DIR = r"E:\vaulto-ai\app\saved_models"
-os.makedirs(MODEL_DIR, exist_ok=True)
+REPO_ROOT = Path(__file__).resolve().parent
+DATA_DIR = REPO_ROOT / "data"
+MODEL_DIR = REPO_ROOT / "app" / "saved_models"
+DATA_FILES = ("budgetwise_finance_dataset.csv", "budgetwise_synthetic_dirty.csv")
 
-files_to_load = [
-    os.path.join(DATA_DIR, "budgetwise_finance_dataset.csv"),
-    os.path.join(DATA_DIR, "budgetwise_synthetic_dirty.csv"),
+CANONICAL = [
+    "Food", "Transport", "Shopping", "Bills", "Entertainment",
+    "Healthcare", "Education", "Rent", "Salary", "Freelance", "Other",
 ]
 
-print("📂 Ingesting training datasets...")
-dfs = []
-for file_path in files_to_load:
-    if os.path.exists(file_path):
-        print(f" - Loading: {os.path.basename(file_path)}")
-        df = pd.read_csv(file_path)
-        df.columns = df.columns.str.lower().str.strip()
-        dfs.append(df)
+# Canonical names and common spellings used as fuzzy-match targets.
+LOOKUP = {name.lower(): name for name in CANONICAL}
+LOOKUP.update({
+    # Food
+    "fod": "Food", "foods": "Food", "foodd": "Food", "foood": "Food",
+    "ffood": "Food", "fodo": "Food", "ofod": "Food", "ood": "Food", "foo": "Food",
+    # Rent
+    "rentt": "Rent", "rnt": "Rent", "reent": "Rent", "ret": "Rent",
+    "retn": "Rent", "ernt": "Rent", "rnet": "Rent", "rennt": "Rent",
+    # Transport
+    "travel": "Transport", "traval": "Transport", "travl": "Transport",
+    "ravel": "Transport", "tarvel": "Transport", "rtavel": "Transport",
+    "travell": "Transport", "trvael": "Transport", "travle": "Transport",
+    # Bills / utilities
+    "utility": "Bills", "utilities": "Bills", "utilties": "Bills",
+    "utlities": "Bills", "uitlities": "Bills", "utillities": "Bills",
+    "utilitie": "Bills", "utilise": "Bills",
+    # Healthcare
+    "health": "Healthcare", "helth": "Healthcare",
+    # Entertainment
+    "entertain": "Entertainment", "entertainment": "Entertainment",
+    "ent": "Entertainment",
+    # Education
+    "edu": "Education", "educaton": "Education", "edcation": "Education",
+    "edducation": "Education",
+    # Salary / freelance
+    "salaryy": "Salary", "saary": "Salary", "saalry": "Salary",
+    "salay": "Salary", "salry": "Salary", "slary": "Salary",
+    "bonus": "Salary", "bbonus": "Salary", "bnous": "Salary",
+    "bonnus": "Salary", "bons": "Salary", "obnus": "Salary", "onus": "Salary",
+    "freelancing": "Freelance",
+    # Other income and assorted noise
+    "savings": "Other", "saving": "Other", "saings": "Other",
+    "saivngs": "Other", "saviings": "Other", "savinggs": "Other",
+    "svings": "Other", "investment": "Other", "misc": "Other",
+    "others": "Other", "other income": "Other", "oother income": "Other",
+    "otehrs": "Other", "oother": "Other",
+})
 
-combined_df = pd.concat(dfs, ignore_index=True)
+# The synthetic source assigns categories at random relative to the note text,
+# so unambiguous descriptions are relabelled before training.
+KEYWORD_RULES = [
+    ("Food", ("dinner", "lunch", "breakfast", "restaurant", "resto", "coffee",
+              "grocery", "groceries", "pizza", "food", "cafe", "snack")),
+    ("Rent", ("rent", "landlord", "lease")),
+    ("Transport", ("uber", "cab", "taxi", "metro", "bus", "fuel", "petrol",
+                   "train", "flight", "travel", "commute")),
+    ("Bills", ("electricity", "water bill", "gas bill", "internet", "utility", "bill")),
+    ("Entertainment", ("movie", "netflix", "concert", "streaming", "cinema", "game")),
+    ("Healthcare", ("doctor", "hospital", "pharmacy", "medicine", "clinic", "gym")),
+    ("Education", ("course", "tuition", "school", "college", "book", "fee", "class")),
+    ("Salary", ("salary", "paycheck", "payroll", "bonus")),
+    ("Freelance", ("freelance", "client", "invoice")),
+    ("Shopping", ("shopping", "amazon", "clothes", "shoes", "electronics")),
+    ("Other", ("atm withdrawal", "gift", "misc", "investment", "saving")),
+]
 
-# Standardize columns
-column_mapping = {
-    'transaction_amount': 'amount',
-    'expense_amount': 'amount',
-    'trans_date': 'date',
-    'transaction_date': 'date',
-    'category_name': 'category',
-    'notes': 'description'
-}
-combined_df.rename(columns=column_mapping, inplace=True)
 
-# Clean numeric amounts and categories
-combined_df['amount'] = combined_df['amount'].astype(str).str.replace(r'[$,\s]', '', regex=True)
-combined_df['amount'] = pd.to_numeric(combined_df['amount'], errors='coerce')
-combined_df['date'] = pd.to_datetime(combined_df['date'], errors='coerce').dt.strftime('%Y-%m-%d')
-combined_df.dropna(subset=['amount', 'date'], inplace=True)
-combined_df = combined_df[combined_df['amount'] > 0]
+def canonicalize_category(raw_label: str) -> str:
+    label = re.sub(r"[^a-z ]", " ", str(raw_label).lower().strip())
+    label = re.sub(r"\s+", " ", label).strip()
+    if label in LOOKUP:
+        return LOOKUP[label]
+    match = difflib.get_close_matches(label, LOOKUP.keys(), n=1, cutoff=0.65)
+    return LOOKUP[match[0]] if match else "Other"
 
-if 'category' not in combined_df.columns:
-    combined_df['category'] = 'General'
-combined_df['category'] = combined_df['category'].fillna('General').astype(str).str.strip().str.title()
 
-if 'description' not in combined_df.columns:
-    combined_df['description'] = combined_df['category']
-combined_df['description'] = combined_df['description'].fillna(combined_df['category']).astype(str)
+def category_from_description(description: str):
+    for category, keywords in KEYWORD_RULES:
+        if any(word in description for word in keywords):
+            return category
+    return None
 
-print(f"✅ Preprocessed {len(combined_df)} records for training.")
 
-# ---------------------------------------------------------
-# 1. Train Isolation Forest Anomaly Model
-# ---------------------------------------------------------
-print("\n🤖 1/3 Training Isolation Forest Anomaly Model...")
-X_iso = np.log1p(combined_df[["amount"]].values)
-iso_forest = IsolationForest(contamination=0.05, random_state=42)
-iso_forest.fit(X_iso)
-joblib.dump(iso_forest, os.path.join(MODEL_DIR, "isolation_forest.joblib"))
+def load_and_clean() -> pd.DataFrame:
+    frames = []
+    for name in DATA_FILES:
+        path = DATA_DIR / name
+        if not path.exists():
+            raise FileNotFoundError(f"Missing training data: {path}")
+        frame = pd.read_csv(path)
+        frame.columns = frame.columns.str.lower().str.strip()
+        frames.append(frame)
 
-# ---------------------------------------------------------
-# 2. Compute Category Baselines
-# ---------------------------------------------------------
-print("\n📊 2/3 Computing Category Average Baselines...")
-category_baselines = combined_df.groupby("category")["amount"].mean().to_dict()
-joblib.dump(category_baselines, os.path.join(MODEL_DIR, "category_baselines.joblib"))
+    df = pd.concat(frames, ignore_index=True)
+    df["description"] = (
+        df["notes"].fillna("").astype(str).str.lower().str.strip()
+        if "notes" in df.columns else ""
+    )
+    df["amount"] = pd.to_numeric(
+        df["amount"].astype(str).str.replace(r"[$,\s]", "", regex=True),
+        errors="coerce",
+    )
+    df.dropna(subset=["amount"], inplace=True)
+    df = df[df["amount"] > 0].copy()
 
-# ---------------------------------------------------------
-# 3. Train TF-IDF + Random Forest Classifier
-# ---------------------------------------------------------
-print("\n🏷️ 3/3 Training TF-IDF + Random Forest Transaction Categorizer...")
-# Filter valid text entries
-text_df = combined_df[combined_df['description'].str.strip() != ''].copy()
+    source_categories = df["category"].map(canonicalize_category)
+    text_categories = df["description"].map(category_from_description)
+    df["category"] = text_categories.fillna(source_categories)
+    corrections = int((text_categories.notna() & (text_categories != source_categories)).sum())
 
-vectorizer = TfidfVectorizer(ngram_range=(1, 2), max_features=1000, stop_words='english')
-X_text = vectorizer.fit_transform(text_df['description'])
-y_labels = text_df['category']
+    low = df.groupby("category")["amount"].transform(lambda s: s.quantile(0.01))
+    high = df.groupby("category")["amount"].transform(lambda s: s.quantile(0.99))
+    df["amount"] = df["amount"].clip(low, high)
+    df = df[df["description"].str.len() > 0].copy()
 
-clf = RandomForestClassifier(n_estimators=100, random_state=42)
-clf.fit(X_text, y_labels)
+    print(f"Loaded {len(df)} usable rows from {len(DATA_FILES)} files")
+    print(f"Relabelled {corrections} rows from unambiguous description keywords")
+    print("Category counts:", df["category"].value_counts().to_dict())
+    return df
 
-joblib.dump(vectorizer, os.path.join(MODEL_DIR, "tfidf_vectorizer.joblib"))
-joblib.dump(clf, os.path.join(MODEL_DIR, "category_classifier.joblib"))
 
-print("\n🎉 Training Complete! Saved models to E:\\vaulto-ai\\app\\saved_models\\:")
-print(" - isolation_forest.joblib")
-print(" - category_baselines.joblib")
-print(" - tfidf_vectorizer.joblib")
-print(" - category_classifier.joblib")
+def train_categorizer(df: pd.DataFrame) -> None:
+    X_train, X_test, y_train, y_test = train_test_split(
+        df["description"], df["category"], test_size=0.2,
+        random_state=42, stratify=df["category"],
+    )
+
+    features = FeatureUnion([
+        ("word", TfidfVectorizer(ngram_range=(1, 2), max_features=2000,
+                                 sublinear_tf=True, strip_accents="unicode")),
+        ("char", TfidfVectorizer(analyzer="char_wb", ngram_range=(3, 5),
+                                 max_features=2000, sublinear_tf=True)),
+    ])
+    X_train_vec = features.fit_transform(X_train)
+    X_test_vec = features.transform(X_test)
+    print(f"TF-IDF feature count: {X_train_vec.shape[1]}")
+
+    models = {
+        "LogisticRegression": LogisticRegression(max_iter=1000, C=5.0),
+        "RandomForest": RandomForestClassifier(
+            n_estimators=100, random_state=42, n_jobs=-1, max_depth=20,
+        ),
+    }
+    results = {}
+    for name, model in models.items():
+        model.fit(X_train_vec, y_train)
+        acc = accuracy_score(y_test, model.predict(X_test_vec))
+        results[name] = acc
+        print(f"{name} accuracy: {acc:.4f}")
+
+    best_name = max(results, key=results.get)
+    best = models[best_name]
+    print(f"Selected: {best_name}")
+    print(classification_report(y_test, best.predict(X_test_vec), zero_division=0))
+
+    joblib.dump(features, MODEL_DIR / "tfidf_vectorizer.joblib")
+    joblib.dump(best, MODEL_DIR / "category_classifier.joblib")
+    size_mb = (MODEL_DIR / "category_classifier.joblib").stat().st_size / 1_000_000
+    print(f"Categorizer saved ({size_mb:.2f} MB)")
+
+    sample = features.transform(["dinner at restaurant"])
+    print(f"Check - 'dinner at restaurant' -> {best.predict(sample)[0]}")
+
+
+def train_anomaly_model(df: pd.DataFrame) -> None:
+    X = np.log1p(df[["amount"]].values)
+    forest = IsolationForest(contamination=0.05, random_state=42).fit(X)
+    joblib.dump(forest, MODEL_DIR / "isolation_forest.joblib")
+    # Calibration scores let inference honour a caller's contamination value.
+    joblib.dump(forest.decision_function(X), MODEL_DIR / "isolation_scores.joblib")
+
+    baselines = df.groupby("category")["amount"].mean().to_dict()
+    joblib.dump(baselines, MODEL_DIR / "category_baselines.joblib")
+    print("Anomaly model and baselines saved")
+    for category, avg in sorted(baselines.items(), key=lambda item: -item[1])[:5]:
+        print(f"  {category}: {avg:,.2f}")
+
+
+def main() -> None:
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    df = load_and_clean()
+    train_categorizer(df)
+    train_anomaly_model(df)
+    print(f"Artifacts written to {MODEL_DIR}")
+
+
+if __name__ == "__main__":
+    main()
