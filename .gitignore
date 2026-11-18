@@ -1,2 +1,14 @@
+# Secrets / environment
 .env
-.env.example
+!.env.example
+
+# Python caches
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Virtual environments
+venv/
+
+# Generated model artifacts (created by train_models.py)
+app/saved_models/*.joblib

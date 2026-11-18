@@ -1,51 +1,29 @@
 ﻿from fastapi import FastAPI
-from pydantic import BaseModel
-from typing import List
-from app.models.schemas import TransactionItem
-from app.services.ml_engine import (
-    predict_spending_forecast,
-    detect_spending_anomalies,
-    predict_transaction_category
-)
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.api.v1.chat import router as chat_router
+from app.api.v1.ml import router as ml_router
+from app.config import settings
 
 app = FastAPI(
     title="Vaulto AI Microservice",
     description="Machine Learning predictions, anomaly detection, and transaction categorization",
-    version="1.0.0"
+    version="1.0.0",
 )
 
-# ---------------------------------------------------------
-# Request Schemas
-# ---------------------------------------------------------
-class ForecastRequest(BaseModel):
-    user_id: str
-    transactions: List[TransactionItem]
+origins = [origin.strip() for origin in settings.CORS_ORIGINS.split(",") if origin.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-class AnomalyRequest(BaseModel):
-    user_id: str
-    contamination: float = 0.05
-    transactions: List[TransactionItem]
+app.include_router(ml_router, prefix="/api/v1")
+app.include_router(chat_router, prefix="/api/v1")
 
-class CategorizeRequest(BaseModel):
-    description: str
 
-# ---------------------------------------------------------
-# Routes
-# ---------------------------------------------------------
 @app.get("/")
 def read_root():
     return {"message": "Vaulto AI Microservice is running ✅"}
-
-@app.post("/api/v1/ml/forecast", tags=["Machine Learning"])
-def get_spending_forecast(payload: ForecastRequest):
-    result = predict_spending_forecast(payload.transactions)
-    return {"user_id": payload.user_id, **result}
-
-@app.post("/api/v1/ml/anomalies", tags=["Machine Learning"])
-def get_spending_anomalies(payload: AnomalyRequest):
-    result = detect_spending_anomalies(payload.transactions, payload.contamination)
-    return {"user_id": payload.user_id, **result}
-
-@app.post("/api/v1/ml/categorize", tags=["Machine Learning"])
-def categorize_transaction(payload: CategorizeRequest):
-    return predict_transaction_category(payload.description)
