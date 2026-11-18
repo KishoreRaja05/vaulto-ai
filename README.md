@@ -1,57 +1,135 @@
-# 🤖 Vaulto AI — Microservice Engine
+# Vaulto AI — ML / AI microservice
 
-**`vaulto-ai`** is the dedicated Python AI/ML microservice for the **Vaulto AI Finance Platform**. Built with **FastAPI**, **Scikit-learn**, and **Supabase `pgvector`**, it handles heavy numerical modeling, predictive financial forecasting, spending anomaly detection, Retrieval-Augmented Generation (RAG), and LLM intent orchestration [1, 2].
+`vaulto-ai` is the Python/FastAPI service for the Vaulto finance platform. It provides
+spending forecasts, anomaly detection, transaction categorization, and a Groq/Llama
+chat agent that calls tools through the Node backend. It does **not** own authentication
+or write to the database directly.
 
----
+## Current status
 
-## 🏛️ Polyglot Architecture & Role
+| Capability | Status | Notes |
+|---|---|---|
+| Spending forecast | Working | Linear trend on cumulative daily spend; reports R² and a 90% residual interval |
+| Anomaly detection | Working | IsolationForest; caller-supplied `contamination` controls the score threshold |
+| Transaction categorization | Working | TF-IDF (word + char) + LogisticRegression; ~0.88 accuracy on the current dataset |
+| Chat / tool calling | Working | Groq tool calling with 4 tools; requires `GROQ_API_KEY` and a running Node backend |
+| RAG / pgvector | **Planned** | Not implemented; `app/services/rag_engine.py` is empty |
+| Auth, transaction CRUD | Owned by `vaulto-backend` | LLM tool calls are validated here, authorized and written by the Node service |
+| Docker / compose | Working | Builds models during image build |
+| Tests | Working | `python -m pytest -q` |
 
-Vaulto uses a **polyglot microservices architecture** where each service is built with the language best suited for its system responsibilities [3]:
+### Architecture
 
-                            Vaulto AI Architecture
-                                      │
-        ┌─────────────────────────────┴─────────────────────────────┐
-        ▼                                                           ▼
-vaulto-backend (Node.js)                                    vaulto-ai (Python) (Application Authority & Auth)                           (AI / ML Service Engine) │                                                           │ ▼                                                           ▼ Supabase PostgreSQL                                    LLM + ML + RAG (pgvector)
+```text
+                          +-------------------+
+                          |   Vaulto client   |
+                          +---------+---------+
+                                    |
+              +---------------------+---------------------+
+              |                                           |
+      +-------v-------+                           +-------v-------+
+      | vaulto-backend| <------ HTTP + JWT -------|   vaulto-ai   |
+      | Node/Express  |        /transactions      | Python/FastAPI|
+      | auth + CRUD   |                           | ML + LLM agent|
+      +-------+-------+                           +-------+-------+
+              |                                           |
+      +-------v-------+                           +-------v-------+
+      | Supabase DB   |                           | saved_models/ |
+      | source of truth                           | .joblib files |
+      +---------------+                           +---------------+
+```
 
-* **`vaulto-backend` (Node.js + Express):** Governs user authentication, transaction CRUD operations, authorization, and database security [4, 5].
-* **`vaulto-ai` (Python + FastAPI):** Handles machine learning modeling, vector embeddings, semantic RAG search, and LLM tool calling orchestration [1, 4].
-* **Security Gate Principle:** The LLM does **not** have direct write access to the production database [6, 7]. Natural language actions (e.g., *"Add ₹500 for dinner"*) are parsed into structured tool calls by `vaulto-ai` and routed back to `vaulto-backend` for JWT authentication and permission validation before writing to PostgreSQL [5, 7, 8].
+The LLM is treated as an untrusted request generator: its tool arguments are validated
+with Pydantic, the user ID and JWT come from the incoming request, and every data
+operation goes through `vaulto-backend` over HTTP. No direct database writes occur here.
 
----
+## Setup
 
-## 🚀 Key Features
+```bash
+python -m venv venv
+source venv/bin/activate          # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env              # Windows: copy .env.example .env
+python train_models.py            # required once: models are gitignored
+uvicorn app.main:app --reload
+```
 
-1. **📈 Spending Forecast (ML):** Trains regression models (Linear Regression, Random Forest) on historical user transactions to project month-end expense totals [9, 10].
-2. **🚨 Anomaly Detection (ML):** Deploys an **Isolation Forest** model to detect unusual transaction amounts relative to category averages [11, 12].
-3. **📚 Financial RAG Knowledge Base:** Performs semantic similarity searches over personal finance concepts using `pgvector` in Supabase [13, 14].
-4. **💬 Conversational AI Tool Calling:** Uses LLMs (via Groq / Llama) to parse user intent and execute actions (*create*, *query*, *update*, *delete* transactions) via backend APIs [15, 16].
+Fill in `GROQ_API_KEY` in `.env` to enable chat. `NODE_BACKEND_URL` must point at the
+Node service, which is expected to expose `GET /transactions` and `POST /transactions`
+and accept the forwarded `Authorization` header.
 
----
+### Docker
 
-## 📂 Directory Layout
+```bash
+docker compose up --build
+```
+
+The image installs pinned dependencies, runs `train_models.py`, and serves uvicorn on
+port 8000. `docker-compose.yml` passes `.env` via `env_file`.
+
+### Tests
+
+```bash
+python -m pytest -q
+```
+
+Groq and the Node backend are mocked in tests. The ML tests use the artifacts produced
+by `python train_models.py`, so run training first on a fresh checkout.
+
+## API
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/` | Health check |
+| POST | `/api/v1/ml/forecast` | Project month-end spending |
+| POST | `/api/v1/ml/anomalies` | Flag unusual transactions |
+| POST | `/api/v1/ml/categorize` | Categorize a description |
+| POST | `/api/v1/chat` | Conversational tool calling (`Authorization: Bearer <jwt>`) |
+| GET | `/api/v1/chat/status` | Chat service status |
+
+Chat tools: `get_spending_summary`, `create_transaction`, `predict_monthly_spending`,
+`detect_anomaly`. Tool calling is capped at 5 iterations per request.
+
+## Configuration
+
+| Variable | Purpose |
+|---|---|
+| `PORT`, `ENVIRONMENT` | Service metadata |
+| `GROQ_API_KEY`, `GROQ_MODEL` | Groq credentials and model name |
+| `NODE_BACKEND_URL` | Base URL of the Node service used by all data tools |
+| `CORS_ORIGINS` | Comma-separated browser origins allowed by CORS |
+| `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | Reserved for planned RAG; unused today |
+
+## Training notes
+
+`train_models.py` is the only training entry point. It reads the two CSVs in `data/`
+using paths relative to this repository, canonicalizes category labels with an alias
+map plus fuzzy matching, and clips amounts per category to the 1st–99th percentile.
+
+The supplied dataset is synthetic and assigns categories largely at random relative to
+descriptions (for example, "restaurant dinner" appears under many labels). To bootstrap
+a usable model, unambiguous descriptions are relabelled from keyword rules before
+training; the reported accuracy therefore measures imitation of those rules, not
+real-world labeling quality. Replace this with genuinely labeled data when available.
+
+## Layout
 
 ```text
 vaulto-ai/
 ├── app/
-│   ├── __init__.py           # Package marker
-│   ├── main.py               # FastAPI entry point & CORS configuration
-│   ├── config.py             # Environment variable management (Pydantic BaseSettings)
-│   ├── api/
-│   │   ├── __init__.py
-│   │   └── v1/
-│   │       ├── __init__.py
-│   │       ├── chat.py       # Endpoint: /api/v1/chat (LLM orchestration & tools)
-│   │       └── ml.py         # Endpoint: /api/v1/ml (Forecasts & Anomaly detection)
+│   ├── main.py                 # FastAPI app, CORS, routers
+│   ├── config.py               # Environment settings
+│   ├── api/v1/                 # ml.py and chat.py routers
+│   ├── models/schemas.py       # Pydantic request/response schemas
 │   ├── services/
-│   │   ├── __init__.py
-│   │   ├── ml_engine.py      # Scikit-learn models (Regression, Isolation Forest)
-│   │   ├── rag_engine.py     # Supabase pgvector search integration
-│   │   └── llm_agent.py      # Groq / Llama tool caller & intent parser
-│   └── models/
-│       ├── __init__.py
-│       └── schemas.py        # Pydantic request/response validation schemas
-├── .env.example              # Environment variables template
-├── .gitignore                # Excludes venv/, .env, __pycache__
-├── Dockerfile                # Multi-stage Python 3.12 deployment image
-└── requirements.txt          # Package dependencies
+│   │   ├── ml_engine.py        # Forecast, anomaly, categorizer inference
+│   │   ├── llm_agent.py        # Groq tool calling + backend HTTP
+│   │   └── rag_engine.py       # Planned (empty)
+│   └── saved_models/           # Generated by train_models.py, gitignored
+├── data/                       # Training CSVs
+├── tests/                      # API tests
+├── train_models.py             # Reproducible trainer
+├── Dockerfile, docker-compose.yml
+├── requirements.txt            # Pinned dependencies
+└── .env.example                # Placeholders only
+```
