@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from typing import List, Literal, Optional
 
 # ==========================================
 # 1. Base Transaction Schemas
@@ -7,11 +7,11 @@ from typing import List, Optional, Dict, Any
 
 class TransactionItem(BaseModel):
     id: Optional[str] = None
-    amount: float = Field(..., description="Transaction amount in currency unit", example=450.0)
-    category: str = Field(..., description="Expense or income category", example="Food & Dining")
-    date: str = Field(..., description="ISO formatted date string YYYY-MM-DD", example="2026-09-24")
-    description: Optional[str] = Field(None, description="Optional note or merchant name", example="Dinner at restaurant")
-    type: str = Field("expense", description="'expense' or 'income'", example="expense")
+    amount: float = Field(..., description="Transaction amount in currency unit", json_schema_extra={"example": 450.0})
+    category: str = Field(..., description="Expense or income category", json_schema_extra={"example": "Food & Dining"})
+    date: str = Field(..., description="ISO formatted date string YYYY-MM-DD", json_schema_extra={"example": "2026-09-24"})
+    description: Optional[str] = Field(None, description="Optional note or merchant name", json_schema_extra={"example": "Dinner at restaurant"})
+    type: str = Field("expense", description="'expense' or 'income'", json_schema_extra={"example": "expense"})
 
 
 # ==========================================
@@ -19,21 +19,22 @@ class TransactionItem(BaseModel):
 # ==========================================
 
 class ForecastRequest(BaseModel):
-    user_id: str = Field(..., description="Unique user identifier", example="usr_12345")
+    user_id: str = Field(..., description="Unique user identifier", json_schema_extra={"example": "usr_12345"})
     transactions: List[TransactionItem] = Field(..., description="Historical transaction array")
 
 class ForecastResponse(BaseModel):
     user_id: str
-    projected_month_end_spend: float = Field(..., description="Scikit-learn projected total month-end expense")
+    projected_month_end_spend: float = Field(..., description="Projected total month-end expense")
     daily_avg_spend: float = Field(..., description="Average daily spending rate")
-    confidence_score: float = Field(..., description="Model confidence score (0.0 to 1.0)")
+    model_r2: Optional[float] = Field(None, description="R^2 of the fitted trend; null when too little history exists")
+    prediction_interval_90: List[float] = Field(..., description="90% interval from regression residuals (low, high)")
     insights: List[str] = Field(default=[], description="Generated narrative insights from the forecast")
 
 
 class AnomalyDetectionRequest(BaseModel):
     user_id: str
     transactions: List[TransactionItem]
-    contamination: Optional[float] = Field(0.05, description="Expected proportion of anomalies (5% default)")
+    contamination: Optional[float] = Field(0.05, ge=0.001, le=0.5, description="Expected proportion of anomalies (5% default)")
 
 class AnomalyItem(BaseModel):
     transaction_id: Optional[str] = None
@@ -49,24 +50,30 @@ class AnomalyDetectionResponse(BaseModel):
     anomalies: List[AnomalyItem]
 
 
+class CategorizeRequest(BaseModel):
+    description: str = Field(..., description="Transaction description to categorize", json_schema_extra={"example": "dinner at restaurant"})
+
+
+class CategorizeResponse(BaseModel):
+    description: str
+    predicted_category: str
+    confidence: float
+    message: Optional[str] = None
+
+
 # ==========================================
 # 3. AI Chat & Tool Calling Schemas
 # ==========================================
 
 class ChatMessage(BaseModel):
-    role: str = Field(..., description="'user', 'assistant', or 'system'")
+    role: Literal["user", "assistant", "system"] = Field(..., description="Message author role")
     content: str
 
 class ChatRequest(BaseModel):
     user_id: str
-    message: str = Field(..., description="User's natural language input", example="I spent ₹500 on dinner today")
+    message: str = Field(..., description="User's natural language input", json_schema_extra={"example": "I spent ₹500 on dinner today"})
     history: Optional[List[ChatMessage]] = Field(default=[], description="Prior conversation messages")
-
-class ToolCallPayload(BaseModel):
-    tool_name: str = Field(..., description="Target action e.g., 'create_transaction', 'query_analytics'")
-    parameters: Dict[str, Any] = Field(..., description="Extracted tool argument parameters")
 
 class ChatResponse(BaseModel):
     reply: str = Field(..., description="Conversational LLM response back to the user")
-    tool_call: Optional[ToolCallPayload] = Field(None, description="Structured tool call payload to send back to Node backend")
-    rag_context_used: bool = Field(False, description="Whether pgvector semantic search was triggered")
+    tools_used: List[str] = Field(default=[], description="Names of tools executed for this reply")
