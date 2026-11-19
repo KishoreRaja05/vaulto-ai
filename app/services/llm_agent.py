@@ -6,7 +6,7 @@ the database directly.
 """
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import httpx
 from groq import Groq
@@ -17,6 +17,11 @@ from app.models.schemas import ChatRequest, ChatResponse, TransactionItem
 from app.services.ml_engine import detect_spending_anomalies, predict_spending_forecast
 
 MAX_TOOL_ITERATIONS = 5
+
+ALLOWED_CATEGORIES = (
+    "Food", "Transport", "Shopping", "Bills", "Entertainment",
+    "Healthcare", "Education", "Rent", "Salary", "Freelance", "Other",
+)
 
 SYSTEM_PROMPT = (
     "You are Vaulto's finance assistant. Use the provided tools to answer "
@@ -39,7 +44,10 @@ class GetSpendingSummaryArgs(BaseModel):
 
 class CreateTransactionArgs(BaseModel):
     amount: float = Field(..., gt=0)
-    category: str = Field(..., min_length=1)
+    category: Literal[
+        "Food", "Transport", "Shopping", "Bills", "Entertainment",
+        "Healthcare", "Education", "Rent", "Salary", "Freelance", "Other",
+    ] = Field(..., description=f"One of: {', '.join(ALLOWED_CATEGORIES)}")
     date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
     description: Optional[str] = None
     type: str = Field("expense", pattern=r"^(expense|income)$")
@@ -74,7 +82,11 @@ def _tool_definition(name: str, description: str) -> Dict[str, Any]:
 
 TOOL_DEFINITIONS = [
     _tool_definition("get_spending_summary", "Summarize the user's spending by category."),
-    _tool_definition("create_transaction", "Record a new transaction for the user."),
+    _tool_definition(
+        "create_transaction",
+        "Record a new transaction for the user. category must be one of: "
+        + ", ".join(ALLOWED_CATEGORIES) + ".",
+    ),
     _tool_definition("predict_monthly_spending", "Forecast the user's month-end spending."),
     _tool_definition("detect_anomaly", "Find unusual transactions in the user's history."),
 ]

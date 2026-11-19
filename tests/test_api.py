@@ -174,6 +174,50 @@ def test_chat_invalid_tool_args(client, monkeypatch, fake_backend):
     assert fake_backend == []  # invalid arguments must never reach the backend
 
 
+@pytest.mark.parametrize("category", agent.ALLOWED_CATEGORIES)
+def test_create_transaction_args_accept_allowed_categories(category):
+    args = agent.CreateTransactionArgs(amount=100, category=category, date="2026-09-24")
+    assert args.category == category
+
+
+def test_chat_rejects_unknown_category(client, monkeypatch, fake_backend):
+    class BadCategoryGroq:
+        def __init__(self, api_key):
+            self.n = 0
+
+        @property
+        def chat(self):
+            return self
+
+        @property
+        def completions(self):
+            return self
+
+        def create(self, **kwargs):
+            self.n += 1
+            BadCategoryGroq.messages = kwargs["messages"]
+            if self.n == 1:
+                args = '{"amount": 100, "category": "Food & Dining", "date": "2026-09-24"}'
+                return completion(tool_calls=[tool_call("create_transaction", args)])
+            return completion(content="I could not record that.")
+
+    monkeypatch.setattr(agent, "Groq", BadCategoryGroq)
+    response = client.post("/api/v1/chat", json={"user_id": "u1", "message": "add dinner"})
+    assert response.status_code == 200
+    assert response.json()["tools_used"] == ["create_transaction"]
+    assert fake_backend == []
+    tool_messages = [m for m in BadCategoryGroq.messages if m["role"] == "tool"]
+    assert "Invalid arguments for create_transaction" in tool_messages[0]["content"]
+
+
+def test_create_transaction_tool_description_lists_categories():
+    tool = next(t for t in agent.TOOL_DEFINITIONS if t["function"]["name"] == "create_transaction")
+    for category in agent.ALLOWED_CATEGORIES:
+        assert category in tool["function"]["description"]
+    properties = tool["function"]["parameters"]["properties"]["category"]
+    assert sorted(properties["enum"]) == sorted(agent.ALLOWED_CATEGORIES)
+
+
 def test_chat_backend_auth_error(client, monkeypatch, fake_groq):
     def denied(*args, **kwargs):
         raise agent.BackendError("The Vaulto backend rejected your session (401).")

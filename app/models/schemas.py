@@ -8,7 +8,7 @@ from typing import List, Literal, Optional
 class TransactionItem(BaseModel):
     id: Optional[str] = None
     amount: float = Field(..., description="Transaction amount in currency unit", json_schema_extra={"example": 450.0})
-    category: str = Field(..., description="Expense or income category", json_schema_extra={"example": "Food & Dining"})
+    category: str = Field(..., description="Expense or income category", json_schema_extra={"example": "Food"})
     date: str = Field(..., description="ISO formatted date string YYYY-MM-DD", json_schema_extra={"example": "2026-09-24"})
     description: Optional[str] = Field(None, description="Optional note or merchant name", json_schema_extra={"example": "Dinner at restaurant"})
     type: str = Field("expense", description="'expense' or 'income'", json_schema_extra={"example": "expense"})
