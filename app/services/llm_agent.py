@@ -6,29 +6,51 @@ the database directly.
 """
 
 import json
-from typing import Any, Dict, List, Literal, Optional
+import re
+from typing import Any, Dict, List, Optional
 
 import httpx
 from groq import Groq
 from pydantic import BaseModel, Field, ValidationError
 
 from app.config import settings
-from app.models.schemas import ChatRequest, ChatResponse, TransactionItem
+from app.models.schemas import ALLOWED_CATEGORIES, Category, ChatRequest, ChatResponse, TransactionItem
 from app.services.ml_engine import detect_spending_anomalies, predict_spending_forecast
 
 MAX_TOOL_ITERATIONS = 5
-
-ALLOWED_CATEGORIES = (
-    "Food", "Transport", "Shopping", "Bills", "Entertainment",
-    "Healthcare", "Education", "Rent", "Salary", "Freelance", "Other",
-)
 
 SYSTEM_PROMPT = (
     "You are Vaulto's finance assistant. Use the provided tools to answer "
     "questions about the user's transactions and to record transactions they "
     "ask you to add. Never invent transaction data. When a tool returns an "
-    "error, explain it plainly to the user. Be concise."
+    "error, explain it plainly to the user.\n"
+    "All amounts are in Indian Rupees. Always write amounts as ₹ with Indian "
+    "digit grouping where natural (e.g. ₹12,850). Never use £, $ or any other currency.\n"
+    "Reply in plain text only. No markdown, no asterisks, no bullet symbols, no "
+    "headers. Keep replies short (2 to 4 sentences).\n"
+    "Always answer the user's question directly in the first sentence, using the "
+    "data provided. Never ask for information that is already in the context. "
+    "If no budget is set, compare projected expenses against this month's income "
+    "and say so. Only ask a follow-up after answering.\n"
+    "Base your answer only on the numbers in the structured forecast context and "
+    "the tool results. Never invent numbers that are not present there.\n"
+    "When confidence is low, say the estimate is rough because there is little "
+    "history, and never quote or invent confidence intervals."
 )
+
+
+def sanitize_reply(text: Any) -> str:
+    """Safety net: plain text only, with ₹ as the only currency symbol."""
+    if not isinstance(text, str):
+        return "I have no response to share."
+    cleaned = re.sub(r"[£$]\s*(?=\d)", "₹", text)
+    cleaned = cleaned.replace("**", "").replace("__", "").replace("`", "")
+    cleaned = re.sub(r"(?m)^[ \t]{0,3}#{1,6}[ \t]*", "", cleaned)
+    return cleaned.strip()
+
+
+def _chat_response(reply: Any, tools_used: List[str]) -> ChatResponse:
+    return ChatResponse(reply=sanitize_reply(reply), tools_used=tools_used)
 
 
 class BackendError(Exception):
@@ -44,10 +66,7 @@ class GetSpendingSummaryArgs(BaseModel):
 
 class CreateTransactionArgs(BaseModel):
     amount: float = Field(..., gt=0)
-    category: Literal[
-        "Food", "Transport", "Shopping", "Bills", "Entertainment",
-        "Healthcare", "Education", "Rent", "Salary", "Freelance", "Other",
-    ] = Field(..., description=f"One of: {', '.join(ALLOWED_CATEGORIES)}")
+    category: Category = Field(..., description=f"One of: {', '.join(ALLOWED_CATEGORIES)}. Use \"Other\" when nothing fits.")
     date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
     description: Optional[str] = None
     type: str = Field("expense", pattern=r"^(expense|income)$")
@@ -85,9 +104,16 @@ TOOL_DEFINITIONS = [
     _tool_definition(
         "create_transaction",
         "Record a new transaction for the user. category must be one of: "
-        + ", ".join(ALLOWED_CATEGORIES) + ".",
+        + ", ".join(ALLOWED_CATEGORIES) + ". Use \"Other\" when nothing fits.",
     ),
-    _tool_definition("predict_monthly_spending", "Forecast the user's month-end spending."),
+    _tool_definition(
+        "predict_monthly_spending",
+        "Forecast this month's spending. Returns a structured context with month "
+        "income, expenses so far, days elapsed/remaining, projected month-end "
+        "expenses, budget, top category, transaction count, months of history, "
+        "confidence and excluded one-off expenses, alongside the projection "
+        "result. Use only these numbers in your answer.",
+    ),
     _tool_definition("detect_anomaly", "Find unusual transactions in the user's history."),
 ]
 
@@ -214,8 +240,8 @@ def execute_tool(name: str, raw_arguments: Any, user_id: str, jwt: Optional[str]
 def run_chat(payload: ChatRequest, jwt: Optional[str]) -> ChatResponse:
     api_key = settings.GROQ_API_KEY
     if not api_key or api_key.lower().startswith("your"):
-        return ChatResponse(
-            reply="AI chat is not configured. Set GROQ_API_KEY to enable it.", tools_used=[]
+        return _chat_response(
+            "AI chat is not configured. Set GROQ_API_KEY to enable it.", []
         )
 
     messages: List[Dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -226,8 +252,8 @@ def run_chat(payload: ChatRequest, jwt: Optional[str]) -> ChatResponse:
     try:
         client = Groq(api_key=api_key)
     except Exception as exc:
-        return ChatResponse(
-            reply=f"AI service could not be initialized: {exc.__class__.__name__}.", tools_used=[]
+        return _chat_response(
+            f"AI service could not be initialized: {exc.__class__.__name__}.", []
         )
 
     tools_used: List[str] = []
@@ -241,15 +267,14 @@ def run_chat(payload: ChatRequest, jwt: Optional[str]) -> ChatResponse:
             )
         except Exception as exc:
             detail = str(exc)[:200]
-            return ChatResponse(
-                reply=f"AI service error: {exc.__class__.__name__}: {detail}",
-                tools_used=tools_used,
+            return _chat_response(
+                f"AI service error: {exc.__class__.__name__}: {detail}", tools_used
             )
 
         message = response.choices[0].message
         tool_calls = message.tool_calls or []
         if not tool_calls:
-            return ChatResponse(reply=message.content or "I have no response to share.", tools_used=tools_used)
+            return _chat_response(message.content or "I have no response to share.", tools_used)
 
         messages.append({
             "role": "assistant",
@@ -276,7 +301,7 @@ def run_chat(payload: ChatRequest, jwt: Optional[str]) -> ChatResponse:
                 "content": json.dumps(result, default=str),
             })
 
-    return ChatResponse(
-        reply=f"I stopped after {MAX_TOOL_ITERATIONS} tool calls. Please narrow your request.",
-        tools_used=tools_used,
+    return _chat_response(
+        f"I stopped after {MAX_TOOL_ITERATIONS} tool calls. Please narrow your request.",
+        tools_used,
     )

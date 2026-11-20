@@ -1,7 +1,7 @@
 # Vaulto AI — ML / AI microservice
 
 `vaulto-ai` is the Python/FastAPI service for the Vaulto finance platform. It provides
-spending forecasts, anomaly detection, transaction categorization, and a Groq/Llama
+spending forecasts, anomaly detection, transaction categorization, and a Groq-powered
 chat agent that calls tools through the Node backend. It does **not** own authentication
 or write to the database directly.
 
@@ -95,7 +95,7 @@ Chat tools: `get_spending_summary`, `create_transaction`, `predict_monthly_spend
 | Variable | Purpose |
 |---|---|
 | `PORT`, `ENVIRONMENT` | Service metadata |
-| `GROQ_API_KEY`, `GROQ_MODEL` | Groq credentials and model name |
+| `GROQ_API_KEY`, `GROQ_MODEL` | Groq credentials and model name (default `openai/gpt-oss-120b`) |
 | `NODE_BACKEND_URL` | Base URL of the Node service used by all data tools |
 | `CORS_ORIGINS` | Comma-separated browser origins allowed by CORS |
 | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | Reserved for planned RAG; unused today |

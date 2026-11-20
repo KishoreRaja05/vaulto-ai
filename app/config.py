@@ -8,7 +8,7 @@ class Settings(BaseSettings):
 
     # AI & LLM Service Keys
     GROQ_API_KEY: str = ""
-    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_MODEL: str = "openai/gpt-oss-120b"
 
     # Internal Node.js Backend URL (tool calls go here; this service never touches the DB)
     NODE_BACKEND_URL: str = "http://localhost:5000/api"
