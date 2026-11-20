@@ -124,9 +124,28 @@ def predict_spending_forecast(
     daily_avg = total_spent / max(days_elapsed, 1)
 
     by_category: Dict[str, float] = {}
+    category_counts: Dict[str, int] = {}
     for item in month_expenses:
         by_category[item.category] = by_category.get(item.category, 0.0) + float(item.amount)
+        category_counts[item.category] = category_counts.get(item.category, 0) + 1
     top_category, top_category_amount = max(by_category.items(), key=lambda kv: kv[1]) if by_category else (None, 0.0)
+
+    # Per-category averages need a reasonable sample. For newer/custom categories
+    # with fewer than 5 transactions, expose the overall per-transaction average
+    # instead so answers never lean on a one-off category average.
+    overall_avg_expense = total_spent / len(month_expenses) if month_expenses else 0.0
+    category_stats = {
+        name: {
+            "average": round(
+                overall_avg_expense if category_counts.get(name, 0) < 5
+                else float(total) / category_counts[name],
+                2,
+            ),
+            "transactions": category_counts.get(name, 0),
+            "based_on": "overall" if category_counts.get(name, 0) < 5 else "category",
+        }
+        for name, total in by_category.items()
+    }
 
     enough_data = (
         len(transactions) >= MIN_TRANSACTIONS_FOR_ML
@@ -204,6 +223,7 @@ def predict_spending_forecast(
         "budget": budget,
         "top_category": top_category,
         "top_category_amount": round(float(top_category_amount), 2),
+        "category_stats": category_stats,
         "number_of_transactions": len(transactions),
         "months_of_history": full_months,
         "confidence": confidence,
@@ -251,13 +271,20 @@ def detect_spending_anomalies(
     df["anomaly_score"] = scores
 
     anomalies_list = []
+    overall_avg = float(df["amount"].mean())
     for _, row in df[df["anomaly_label"] == -1].iterrows():
         category = str(row["category"])
-        cat_avg = pretrained_baselines.get(
-            category, df[df["category"] == category]["amount"].mean()
-        )
-        if pd.isna(cat_avg) or cat_avg == 0:
-            cat_avg = df["amount"].mean()
+        category_amounts = df[df["category"] == category]["amount"]
+        # Sparse categories (including brand-new custom ones) have no reliable
+        # per-category baseline. Use overall spending statistics instead.
+        if len(category_amounts) < 5:
+            cat_avg = overall_avg
+        else:
+            cat_avg = pretrained_baselines.get(category)
+            if cat_avg is None or pd.isna(cat_avg) or cat_avg == 0:
+                cat_avg = category_amounts.mean()
+            if pd.isna(cat_avg) or cat_avg == 0:
+                cat_avg = overall_avg
 
         direction = "high" if row["amount"] > cat_avg else "low"
         anomalies_list.append({

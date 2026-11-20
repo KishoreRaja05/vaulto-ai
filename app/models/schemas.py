@@ -1,28 +1,34 @@
 from pydantic import BaseModel, BeforeValidator, Field
 from typing import Annotated, Any, Dict, List, Literal, Optional
 
-ALLOWED_CATEGORIES = (
-    "Food", "Transport", "Shopping", "Bills", "Entertainment",
-    "Healthcare", "Education", "Rent", "Salary", "Freelance", "Other",
-)
+# Defaults are hardcoded on the client and the Node server too. They are never
+# stored; custom categories live in the per-user Category table.
+DEFAULT_CATEGORIES = {
+    "expense": ("Food", "Transport", "Shopping", "Bills", "Entertainment"),
+    "income": ("Salary", "Freelance"),
+}
+
+# Kept as a flat tuple for backwards compatibility with imports and tests.
+ALLOWED_CATEGORIES = tuple(DEFAULT_CATEGORIES["expense"]) + tuple(DEFAULT_CATEGORIES["income"])
+
+MAX_CATEGORY_LENGTH = 30
 
 
 def normalize_category(value):
-    if not isinstance(value, str):
-        value = "" if value is None else str(value)
-    for allowed in ALLOWED_CATEGORIES:
-        if value.strip().lower() == allowed.lower():
-            return allowed
-    return "Other"
+    """Preserve arbitrary category strings so custom categories survive ML/AI.
+
+    The Node server is the single writer and canonicalises the name there; this
+    validator only guards against non-strings and runaway lengths.
+    """
+    if value is None:
+        return "Other"
+    text = str(value).strip()
+    return text[:MAX_CATEGORY_LENGTH] or "Other"
 
 
-Category = Annotated[
-    Literal[
-        "Food", "Transport", "Shopping", "Bills", "Entertainment",
-        "Healthcare", "Education", "Rent", "Salary", "Freelance", "Other",
-    ],
-    BeforeValidator(normalize_category),
-]
+# Free-form string: the model may reuse an existing category or propose a new
+# short one. The backend resolves and stores it via ensureCategory().
+Category = Annotated[str, BeforeValidator(normalize_category)]
 
 # ==========================================
 # 1. Base Transaction Schemas
@@ -57,6 +63,10 @@ class ForecastContext(BaseModel):
     budget: Optional[float] = None
     top_category: Optional[str] = None
     top_category_amount: float = 0.0
+    category_stats: Dict[str, Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Category averages; sparse categories fall back to overall spending statistics",
+    )
     number_of_transactions: int
     months_of_history: int
     confidence: Literal["low", "medium", "high"]
@@ -116,7 +126,11 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     user_id: str
     message: str = Field(..., description="User's natural language input", json_schema_extra={"example": "I spent ₹500 on dinner today"})
-    history: Optional[List[ChatMessage]] = Field(default=[], description="Prior conversation messages")
+    history: Optional[List[ChatMessage]] = Field(default_factory=list, description="Prior conversation messages")
+    categories: Dict[str, List[str]] = Field(
+        default_factory=dict,
+        description="Available category names by type (expense/income), defaults plus custom",
+    )
 
 class ChatResponse(BaseModel):
     reply: str = Field(..., description="Conversational LLM response back to the user")

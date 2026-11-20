@@ -14,7 +14,7 @@ from groq import Groq
 from pydantic import BaseModel, Field, ValidationError
 
 from app.config import settings
-from app.models.schemas import ALLOWED_CATEGORIES, Category, ChatRequest, ChatResponse, TransactionItem
+from app.models.schemas import ALLOWED_CATEGORIES, DEFAULT_CATEGORIES, Category, ChatRequest, ChatResponse, TransactionItem
 from app.services.ml_engine import detect_spending_anomalies, predict_spending_forecast
 
 MAX_TOOL_ITERATIONS = 5
@@ -26,6 +26,12 @@ SYSTEM_PROMPT = (
     "error, explain it plainly to the user.\n"
     "All amounts are in Indian Rupees. Always write amounts as ₹ with Indian "
     "digit grouping where natural (e.g. ₹12,850). Never use £, $ or any other currency.\n"
+    "Use one of the user's existing categories if it clearly fits. Only if none "
+    "fits, propose a new short category name (1 to 2 words, Title Case), for "
+    "example Gym or Pet Care. Never invent near-duplicates of existing categories. "
+    "Infer income vs expense from the message (salary, got paid, received = income).\n"
+    "If a tool result says a category was newly created, mention it naturally in "
+    "plain text, for example: Added a ₹800 expense under a new category, Gym.\n"
     "Reply in plain text only. No markdown, no asterisks, no bullet symbols, no "
     "headers. Keep replies short (2 to 4 sentences).\n"
     "Always answer the user's question directly in the first sentence, using the "
@@ -53,6 +59,16 @@ def _chat_response(reply: Any, tools_used: List[str]) -> ChatResponse:
     return ChatResponse(reply=sanitize_reply(reply), tools_used=tools_used)
 
 
+def _category_context(categories: Dict[str, List[str]]) -> str:
+    """Describe the user's real category names to the model for this turn."""
+    expense = list(categories.get("expense") or DEFAULT_CATEGORIES["expense"])
+    income = list(categories.get("income") or DEFAULT_CATEGORIES["income"])
+    return (
+        "Existing categories - Expense: " + ", ".join(str(name) for name in expense)
+        + ". Income: " + ", ".join(str(name) for name in income) + "."
+    )
+
+
 class BackendError(Exception):
     """Raised when the Node backend cannot serve a data request."""
 
@@ -66,7 +82,12 @@ class GetSpendingSummaryArgs(BaseModel):
 
 class CreateTransactionArgs(BaseModel):
     amount: float = Field(..., gt=0)
-    category: Category = Field(..., description=f"One of: {', '.join(ALLOWED_CATEGORIES)}. Use \"Other\" when nothing fits.")
+    category: Category = Field(
+        ...,
+        min_length=1,
+        max_length=30,
+        description="Reuse an existing category if one fits, otherwise a short new name (1 to 2 words, Title Case)",
+    )
     date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
     description: Optional[str] = None
     type: str = Field("expense", pattern=r"^(expense|income)$")
@@ -103,8 +124,12 @@ TOOL_DEFINITIONS = [
     _tool_definition("get_spending_summary", "Summarize the user's spending by category."),
     _tool_definition(
         "create_transaction",
-        "Record a new transaction for the user. category must be one of: "
-        + ", ".join(ALLOWED_CATEGORIES) + ". Use \"Other\" when nothing fits.",
+        "Record a new transaction for the user. category is a free string: reuse "
+        "one of the user's existing categories if it clearly fits, otherwise "
+        "propose a new short category name (1 to 2 words, Title Case). Common "
+        "defaults include " + ", ".join(ALLOWED_CATEGORIES) + ". Infer income vs "
+        "expense from the message (salary, got paid, received = income). The "
+        "backend creates any genuinely new category automatically.",
     ),
     _tool_definition(
         "predict_monthly_spending",
@@ -195,9 +220,17 @@ def get_spending_summary(args: GetSpendingSummaryArgs, user_id: str, jwt: Option
 
 
 def create_transaction(args: CreateTransactionArgs, user_id: str, jwt: Optional[str]) -> Dict[str, Any]:
+    # The Node backend canonicalises/stores the category via ensureCategory and
+    # reports whether it had to create a new row.
     body = {"user_id": user_id, **args.model_dump(exclude_none=True)}
     result = backend_request("POST", "/transactions", jwt=jwt, body=body)
-    return {"created": True, "transaction": result}
+    category_created = bool(result.get("categoryCreated")) if isinstance(result, dict) else False
+    return {
+        "created": True,
+        "transaction": result,
+        "category": args.category,
+        "category_created": category_created,
+    }
 
 
 def predict_monthly_spending(args: PredictMonthlySpendingArgs, user_id: str, jwt: Optional[str]) -> Dict[str, Any]:
@@ -244,7 +277,10 @@ def run_chat(payload: ChatRequest, jwt: Optional[str]) -> ChatResponse:
             "AI chat is not configured. Set GROQ_API_KEY to enable it.", []
         )
 
-    messages: List[Dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    system_content = SYSTEM_PROMPT
+    if payload.categories:
+        system_content += "\n" + _category_context(payload.categories)
+    messages: List[Dict[str, Any]] = [{"role": "system", "content": system_content}]
     for message in payload.history or []:
         messages.append({"role": message.role, "content": message.content})
     messages.append({"role": "user", "content": payload.message})

@@ -189,7 +189,7 @@ def test_create_transaction_args_accept_allowed_categories(category):
     assert args.category == category
 
 
-def test_chat_normalizes_unknown_category_to_other(client, monkeypatch, fake_backend):
+def test_chat_keeps_free_form_category(client, monkeypatch, fake_backend):
     class SpaceshipGroq:
         def __init__(self, api_key):
             self.n = 0
@@ -205,31 +205,54 @@ def test_chat_normalizes_unknown_category_to_other(client, monkeypatch, fake_bac
         def create(self, **kwargs):
             self.n += 1
             if self.n == 1:
-                args = '{"amount": 100, "category": "Spaceship", "date": "2026-09-24"}'
+                args = '{"amount": 100, "category": "Gym", "date": "2026-09-24"}'
                 return completion(tool_calls=[tool_call("create_transaction", args)])
             return completion(content="Recorded.")
 
     monkeypatch.setattr(agent, "Groq", SpaceshipGroq)
-    response = client.post("/api/v1/chat", json={"user_id": "u1", "message": "add spaceship expense"})
+    response = client.post("/api/v1/chat", json={"user_id": "u1", "message": "add gym expense"})
     assert response.status_code == 200
     assert response.json()["tools_used"] == ["create_transaction"]
     assert len(fake_backend) == 1
     assert fake_backend[0]["method"] == "POST"
     assert fake_backend[0]["path"] == "/transactions"
-    assert fake_backend[0]["body"]["category"] == "Other"
+    assert fake_backend[0]["body"]["category"] == "Gym"
     assert fake_backend[0]["body"]["amount"] == 100
     assert fake_backend[0]["body"]["date"] == "2026-09-24"
 
 
-def test_create_transaction_tool_description_lists_categories():
+def test_create_transaction_tool_description_allows_free_form_categories():
     tool = next(t for t in agent.TOOL_DEFINITIONS if t["function"]["name"] == "create_transaction")
     description = tool["function"]["description"]
     for category in agent.ALLOWED_CATEGORIES:
         assert category in description
-    assert "Use \"Other\" when nothing fits" in description
+    assert "free string" in description
     properties = tool["function"]["parameters"]["properties"]["category"]
-    assert sorted(properties["enum"]) == sorted(agent.ALLOWED_CATEGORIES)
-    assert "Use \"Other\" when nothing fits" in properties["description"]
+    assert properties["type"] == "string"
+    assert "enum" not in properties
+    assert "1 to 2 words" in properties["description"]
+
+
+def test_create_transaction_tool_reports_new_category(monkeypatch):
+    monkeypatch.setattr(
+        agent, "backend_request",
+        lambda *args, **kwargs: {"id": "t2", "categoryCreated": True},
+    )
+    args = agent.CreateTransactionArgs(amount=800, category="Gym", date="2026-09-24")
+    result = agent.create_transaction(args, "u1", "Bearer test-jwt")
+    assert result["category"] == "Gym"
+    assert result["category_created"] is True
+
+    monkeypatch.setattr(agent, "backend_request", lambda *args, **kwargs: {"id": "t3"})
+    reused = agent.create_transaction(args, "u1", "Bearer test-jwt")
+    assert reused["category_created"] is False
+
+
+def test_custom_category_preserved_in_transaction_items():
+    items = agent.to_transaction_items([
+        {"amount": 100, "category": "Gym", "date": "2026-09-01", "type": "expense"}
+    ])
+    assert items[0].category == "Gym"
 
 
 def test_legacy_category_normalized_for_ml_endpoints(client):
@@ -427,3 +450,56 @@ def test_chat_history_order_and_backward_compatibility(client, monkeypatch, fake
     legacy = client.post("/api/v1/chat", json={"user_id": "u1", "message": "hi"})
     assert legacy.status_code == 200
     assert [message["role"] for message in seen[0]] == ["system", "user"]
+
+
+def test_chat_includes_available_categories(client, monkeypatch, fake_backend):
+    seen = []
+
+    class SimpleGroq:
+        def __init__(self, api_key):
+            pass
+
+        @property
+        def chat(self):
+            return self
+
+        @property
+        def completions(self):
+            return self
+
+        def create(self, **kwargs):
+            seen.append(kwargs["messages"])
+            return completion(content="Done.")
+
+    monkeypatch.setattr(agent, "Groq", SimpleGroq)
+    response = client.post("/api/v1/chat", json={
+        "user_id": "u1",
+        "message": "add 800 for gym",
+        "categories": {
+            "expense": ["Food", "Gym"],
+            "income": ["Salary", "Freelance"],
+        },
+    })
+    assert response.status_code == 200
+    system = seen[0][0]["content"]
+    assert "Existing categories - Expense: Food, Gym." in system
+    assert "Income: Salary, Freelance." in system
+    assert [message["role"] for message in seen[0]] == ["system", "user"]
+
+
+def test_forecast_sparse_category_stats_use_overall_average(client):
+    transactions = [
+        {"amount": 800, "category": "Gym", "date": "2026-09-01", "type": "expense"},
+    ] + [
+        {"amount": 100, "category": "Food", "date": f"2026-09-{day:02d}", "type": "expense"}
+        for day in range(2, 7)
+    ]
+    response = client.post("/api/v1/ml/forecast", json={
+        "user_id": "u1", "transactions": transactions,
+    })
+    assert response.status_code == 200
+    stats = response.json()["context"]["category_stats"]
+    assert stats["Gym"]["based_on"] == "overall"
+    assert stats["Food"]["based_on"] == "category"
+    assert stats["Gym"]["average"] == 216.67
+    assert stats["Food"]["average"] == 100.0
