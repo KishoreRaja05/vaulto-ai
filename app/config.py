@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+
 class Settings(BaseSettings):
     # App Settings
     PROJECT_NAME: str = "Vaulto AI Service"
@@ -16,6 +17,11 @@ class Settings(BaseSettings):
     # Comma-separated origins allowed to call this service from a browser
     CORS_ORIGINS: str = "http://localhost:3000,http://localhost:5173"
 
+    # Internal-only endpoints (e.g. /parse) require this key from the Node backend
+    INTERNAL_API_KEY: str = ""
+    DAILY_LLM_CALL_LIMIT: int = 200
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
 
 settings = Settings()

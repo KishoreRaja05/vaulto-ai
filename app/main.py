@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.chat import router as chat_router
 from app.api.v1.ml import router as ml_router
+from app.api.v1.parse import router as parse_router
 from app.config import settings
 
 app = FastAPI(
@@ -22,6 +23,7 @@ app.add_middleware(
 
 app.include_router(ml_router, prefix="/api/v1")
 app.include_router(chat_router, prefix="/api/v1")
+app.include_router(parse_router)
 
 
 @app.get("/")
