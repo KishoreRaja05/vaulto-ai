@@ -131,6 +131,10 @@ class ChatRequest(BaseModel):
         default_factory=dict,
         description="Available category names by type (expense/income), defaults plus custom",
     )
+    page_context: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Optional, compact description of the screen the user is looking at",
+    )
 
 class ChatResponse(BaseModel):
     reply: str = Field(..., description="Conversational LLM response back to the user")
