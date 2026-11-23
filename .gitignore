@@ -12,3 +12,4 @@ venv/
 
 # Generated model artifacts (created by train_models.py)
 app/saved_models/*.joblib
+models_cache/
